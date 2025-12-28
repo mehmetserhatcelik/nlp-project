@@ -9,10 +9,18 @@ from transformers import AutoTokenizer, AutoModel
 from rank_bm25 import BM25Okapi
 
 # --- YAPILANDIRMA ---
-INPUT_FILE = "data/yargitay_dataset.json"         # Scraper'dan çıkan dosya
-FAISS_INDEX_FILE = "data/index/yargitay_legal.index"     # Dense Index
-BM25_FILE = "data/index/yargitay_bm25.pkl"               # Sparse Index
-MAPPING_FILE = "data/yargitay_id_mapping.json"     # ID Eşleşmesi
+# Yargıtay dataset
+YARGITAY_INPUT_FILE = "data/yargitay_dataset.json"
+YARGITAY_FAISS_INDEX_FILE = "data/index/yargitay_legal.index"
+YARGITAY_BM25_FILE = "data/index/yargitay_bm25.pkl"
+YARGITAY_MAPPING_FILE = "data/yargitay_id_mapping.json"
+
+# Similar Cases dataset
+SIMILAR_CASES_INPUT_FILE = "data/similar_cases.json"
+SIMILAR_CASES_FAISS_INDEX_FILE = "data/index/similar_cases_legal.index"
+SIMILAR_CASES_BM25_FILE = "data/index/similar_cases_bm25.pkl"
+SIMILAR_CASES_MAPPING_FILE = "data/similar_cases_id_mapping.json"
+
 MODEL_NAME = "KocLab-Bilkent/BERTurk-Legal"
 
 # Cihaz ayarı (GPU varsa hızlanır)
@@ -21,104 +29,151 @@ print(f"İşlem cihazı: {device}")
 
 def clean_text(text):
     """BM25 için basit temizlik ve tokenization"""
-    # Noktalama işaretlerini kaldır, küçült
-    text = re.sub(r'[^\w\s]', '', text.lower())
+    # Basit bir Türkçe tokenizer simülasyonu
+    text = text.lower()
+    # Noktalama işaretlerini kaldır
+    text = re.sub(r'[^\w\s]', '', text)
     return text.split()
 
-def load_data():
-    if not os.path.exists(INPUT_FILE):
-        print(f"HATA: {INPUT_FILE} bulunamadı! Önce scraper kodunu çalıştırın.")
+def load_data(input_file, dataset_name):
+    """Dataset dosyasını yükle"""
+    if not os.path.exists(input_file):
+        print(f"HATA: {input_file} bulunamadı!")
         return None
-    with open(INPUT_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    
+    print(f"{dataset_name} dataset yükleniyor: {input_file}...")
+    with open(input_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print(f"  -> {len(data)} karar yüklendi")
+    return data
 
-def build_indices():
-    data = load_data()
-    if not data: return
+def generate_id(decision, index, prefix="YARGITAY"):
+    """Her karar için benzersiz bir ID oluştur"""
+    # URL'den veya case/decision number'dan ID oluştur
+    if decision.get('url'):
+        # URL'den ID çıkar (örn: "GE95G9JAgTI" kısmı)
+        url = decision['url']
+        if 'v=' in url:
+            url_id = url.split('v=')[-1]
+            return f"{prefix}:{url_id}"
+    
+    # Alternatif: case_number ve decision_number kullan
+    case_num = decision.get('case_number', '').strip().replace(' ', '_')
+    decision_num = decision.get('decision_number', '').strip().replace(' ', '_')
+    chamber = decision.get('chamber', '').strip().replace(' ', '_').replace('.', '')
+    
+    if case_num and decision_num:
+        return f"{prefix}:{chamber}_{case_num}_{decision_num}"
+    
+    # Son çare: index kullan
+    return f"{prefix}:{index}"
 
-    print(f"Toplam {len(data)} adet karar parçası (Chunk) indekslenecek.")
+def build_indices_for_dataset(input_file, faiss_index_file, bm25_file, mapping_file, dataset_name, id_prefix):
+    """Belirtilen dataset için BM25 ve FAISS indexleri oluştur"""
+    print("=" * 60)
+    print(f"{dataset_name.upper()} KARAR İNDEKS OLUŞTURMA")
+    print("=" * 60)
+    
+    data = load_data(input_file, dataset_name)
+    if not data:
+        print(f"HATA: {dataset_name} verisi yüklenemedi!")
+        return False
+
+    print(f"\nToplam {len(data)} adet karar indekslenecek.")
 
     # --- 1. AŞAMA: BM25 (SPARSE) INDEKSLEME ---
-    print("\n[1/3] BM25 İndeksi Hazırlanıyor (Table II: Hybrid Retrieval)...")
+    print("\n[1/3] BM25 İndeksi Hazırlanıyor...")
     
     corpus_tokens = []
     ids = []
     
-    for chunk in data:
-        # STRATEJİ: Sybingco et al. [9] - Hibrit Arama için zenginleştirilmiş metin
-        # Poly-Vector: "Yargıtay 3. HD 2021/100" ifadesini de indeksle ki numarayla arayan bulsun.
-        citation = chunk['metadata']['poly_vector']['citation_label']
+    print("BM25 için corpus hazırlanıyor...")
+    for i, decision in enumerate(data):
+        # Full text üzerinden indexleme
+        full_text = decision.get('full_text', '')
         
-        # SAC: Özeti de ekle ki kelime bazlı arama (Örn: "tahliye") metinde geçmese bile özetten yakalasın.
-        summary = chunk['metadata']['sac_context']['parent_summary']
+        # Eğer full_text yoksa, diğer alanları birleştir
+        if not full_text:
+            summary = decision.get('summary', '') or ''
+            conclusion = decision.get('conclusion', '') or ''
+            full_text = f"{summary} {conclusion}".strip()
         
-        # Ana Metin
-        text = chunk['text']
+        tokenized_doc = clean_text(full_text)
+        corpus_tokens.append(tokenized_doc)
         
-        # Hepsini Birleştir
-        combo_text = f"{citation} {summary} {text}"
+        # ID oluştur
+        decision_id = generate_id(decision, i, prefix=id_prefix)
+        ids.append(decision_id)
         
-        corpus_tokens.append(clean_text(combo_text))
-        ids.append(chunk["id"])
-        
+    print(f"\nBM25 modeli eğitiliyor ({len(corpus_tokens)} doküman)...")
     bm25 = BM25Okapi(corpus_tokens)
     
-    with open(BM25_FILE, "wb") as f:
+    # Modeli ve ID listesini kaydet
+    os.makedirs(os.path.dirname(bm25_file), exist_ok=True)
+    with open(bm25_file, "wb") as f:
         pickle.dump({"model": bm25, "ids": ids}, f)
-    print(f"   -> BM25 kaydedildi: {BM25_FILE}")
+    print(f"✅ BM25 indeksi '{bm25_file}' olarak kaydedildi.")
+    print(f"   Toplam {len(ids)} doküman indekslendi")
 
     # --- 2. AŞAMA: DENSE (FAISS) INDEKSLEME ---
-    print("\n[2/3] Dense (Vektör) İndeksi Hazırlanıyor (Table I: SAC & Poly-Vector)...")
+    print("\n[2/3] Dense (Vektör) İndeksi Hazırlanıyor (Full Text Embedding)...")
     
     try:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         model = AutoModel.from_pretrained(MODEL_NAME).to(device)
         model.eval()
+        print(f"Model yüklendi: {MODEL_NAME}")
     except Exception as e:
         print(f"Model yüklenemedi: {e}")
-        return
+        return False
 
     embeddings = []
-    batch_size = 16 # Bellek durumuna göre artırılabilir (32, 64)
+    ids = []  # ID listesi
+    batch_size = 16  # Bellek durumuna göre artırılabilir (32, 64)
     
     for i in range(0, len(data), batch_size):
         batch = data[i:i+batch_size]
         batch_texts = []
         
-        for d in batch:
-            # STRATEJİ: Reuter et al. [2] - Summary Augmented Chunking (SAC)
-            # Embedding = Vector(Citation + Summary + Text)
-            # Bu sayede vektör uzayında "parça" hem kimliğini (Citation) hem bağlamını (Summary) bilir.
+        for j, decision in enumerate(batch):
+            # Full text üzerinden indexleme
+            full_text = decision.get('full_text', '')
             
-            cit = d['metadata']['poly_vector']['citation_label']
-            summ = d['metadata']['sac_context']['parent_summary']
-            txt = d['text']
+            # Eğer full_text yoksa, diğer alanları birleştir
+            if not full_text:
+                summary = decision.get('summary', '') or ''
+                conclusion = decision.get('conclusion', '') or ''
+                full_text = f"{summary} {conclusion}".strip()
             
-            # Modelin anlayacağı format
-            input_txt = f"{cit}. {summ} {txt}"
-            batch_texts.append(input_txt)
+            batch_texts.append(full_text)
             
-        # Tokenize & GPU'ya at
-        inputs = tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
+            # ID oluştur
+            decision_id = generate_id(decision, i + j, prefix=id_prefix)
+            ids.append(decision_id)
         
-        with torch.no_grad():
-            outputs = model(**inputs)
+        # Vektörleri işle
+        if batch_texts:
+            inputs = tokenizer(
+                batch_texts, 
+                return_tensors="pt", 
+                padding=True, 
+                truncation=True, 
+                max_length=512
+            ).to(device)
             
-            # Mean Pooling (Hukuk metinleri için CLS'den daha stabil)
+            with torch.no_grad():
+                outputs = model(**inputs)
+            
             attention_mask = inputs['attention_mask']
             token_embeddings = outputs.last_hidden_state
-            
             input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
             sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
             sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+            batch_embeddings = sum_embeddings / sum_mask
+            embeddings.append(batch_embeddings.cpu().numpy())
             
-            batch_vecs = sum_embeddings / sum_mask
-            
-            # CPU'ya geri al ve listeye ekle
-            embeddings.append(batch_vecs.cpu().numpy())
-            
-        if i % 100 == 0 and i > 0:
-            print(f"   -> {i} parça işlendi...")
+        if i % (batch_size * 10) == 0 and i > 0:
+            print(f"   -> {i} karar işlendi...")
 
     # --- 3. AŞAMA: FAISS KAYIT ---
     print("\n[3/3] FAISS İndeksi Diske Yazılıyor...")
@@ -136,15 +191,34 @@ def build_indices():
     index = faiss.IndexFlatIP(d)
     index.add(all_vecs)
     
-    faiss.write_index(index, FAISS_INDEX_FILE)
+    os.makedirs(os.path.dirname(faiss_index_file), exist_ok=True)
+    faiss.write_index(index, faiss_index_file)
     
-    # ID Mapping'i kaydet (FAISS sadece int ID tutar, biz string ID'leri burada saklıyoruz)
-    with open(MAPPING_FILE, "w", encoding="utf-8") as f:
+    # ID Mapping'i kaydet
+    with open(mapping_file, "w", encoding="utf-8") as f:
         json.dump(ids, f)
         
-    print(f"   -> FAISS İndeksi Hazır: {FAISS_INDEX_FILE}")
-    print(f"   -> ID Eşleşmesi Hazır: {MAPPING_FILE}")
-    print("\n✅ TÜM İŞLEMLER TAMAMLANDI!")
+    print(f"✅ FAISS İndeksi Hazır: {faiss_index_file} (Toplam {len(ids)} vektör)")
+    print(f"✅ ID Eşleşmesi Hazır: {mapping_file}")
+    print(f"\n✅ {dataset_name.upper()} İŞLEMLERİ TAMAMLANDI!")
+    return True
+
+def build_indices():
+    """Sadece Similar Cases için indexleri oluştur"""
+    # Similar Cases dataset için index oluştur
+    success = build_indices_for_dataset(
+        SIMILAR_CASES_INPUT_FILE,
+        SIMILAR_CASES_FAISS_INDEX_FILE,
+        SIMILAR_CASES_BM25_FILE,
+        SIMILAR_CASES_MAPPING_FILE,
+        "Similar Cases",
+        "SIMILAR_CASES"
+    )
+    
+    if success:
+        print("\n✅ SIMILAR CASES İŞLEMLERİ BAŞARIYLA TAMAMLANDI!")
+    else:
+        print("\n⚠️  SIMILAR CASES İŞLEMLERİ TAMAMLANAMADI!")
 
 if __name__ == "__main__":
     build_indices()

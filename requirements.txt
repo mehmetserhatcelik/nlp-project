@@ -1,0 +1,39 @@
+# Python Dependencies for Turkish Legal RAG System
+# Install with: pip install -r requirements.txt
+#
+# Note: PyTorch installation may vary based on your system.
+# For CUDA support, visit: https://pytorch.org/get-started/locally/
+
+# === Core ML/NLP Libraries ===
+torch>=2.0.0
+transformers>=4.35.0
+sentence-transformers>=2.2.0
+numpy>=1.24.0
+
+# === Vector Database & Search ===
+faiss-cpu>=1.7.4
+# Alternative for GPU: faiss-gpu>=1.7.4 (if you have CUDA)
+rank-bm25>=0.2.2
+
+# === Web Framework & API ===
+flask>=2.3.0
+flask-cors>=4.0.0
+
+# === OpenAI Integration ===
+openai>=1.3.0
+
+# === Web Scraping & Data Processing ===
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+selenium>=4.15.0
+webdriver-manager>=4.0.0
+
+# === Utilities ===
+python-dotenv>=1.0.0
+
+# === Optional: Development Tools ===
+# Uncomment if needed for development:
+# jupyter>=1.0.0
+# ipython>=8.0.0
+# pytest>=7.0.0
+

@@ -5,12 +5,57 @@ import json
 import time
 
 # --- CONFIGURATION ---
-LAW_NO = "6098"
-LAW_URL = "https://www.mevzuat.gov.tr/MevzuatMetin/1.5.6098.htm"
-OUTPUT_FILE = "data/tbk_dataset.json"
+LAW_NO = "6098"  # Deprecated: Use TARGET_LAWS list
+LAW_URL = "https://www.mevzuat.gov.tr/MevzuatMetin/1.5.6098.htm"  # Deprecated: Use dynamic URLs
+OUTPUT_FILE = "data/tbk_dataset.json"  # Deprecated: Use dynamic filename based on law_code
+
+# Target laws to fetch
+TARGET_LAWS = [
+    "4721",  # TMK - Türk Medeni Kanunu (Civil Law / Divorce, Inheritance)
+    "5237",  # TCK - Türk Ceza Kanunu (Penal Law / Murder, Theft)
+    "6102",  # TTK - Türk Ticaret Kanunu (Commercial Law)
+    "4857",  # İş Kanunu (Labor Law)
+    "6098",  # TBK - Türk Borçlar Kanunu (Obligations - Existing)
+]
+
+# Law information dictionary
+LAW_INFO = {
+    "6098": {
+        "name": "Türk Borçlar Kanunu",
+        "abbrev": "TBK",
+        "url": "https://www.mevzuat.gov.tr/MevzuatMetin/1.5.6098.htm"
+    },
+    "4721": {
+        "name": "Türk Medeni Kanunu",
+        "abbrev": "TMK",
+        "url": "https://www.mevzuat.gov.tr/MevzuatMetin/1.5.4721.htm"
+    },
+    "5237": {
+        "name": "Türk Ceza Kanunu",
+        "abbrev": "TCK",
+        "url": "https://www.mevzuat.gov.tr/MevzuatMetin/1.5.5237.htm"
+    },
+    "6102": {
+        "name": "Türk Ticaret Kanunu",
+        "abbrev": "TTK",
+        "url": "https://www.mevzuat.gov.tr/MevzuatMetin/1.5.6102.htm"
+    },
+    "4857": {
+        "name": "İş Kanunu",
+        "abbrev": "İK",
+        "url": "https://www.mevzuat.gov.tr/MevzuatMetin/1.5.4857.htm"
+    },
+}
 
 class TurkishStatuteRAG:
-    def __init__(self):
+    def __init__(self, law_code="6098"):
+        self.law_code = law_code
+        self.law_info = LAW_INFO.get(law_code, LAW_INFO["6098"])  # Default to TBK if not found
+        self.law_name = self.law_info["name"]
+        self.law_abbrev = self.law_info["abbrev"]
+        self.law_url = self.law_info["url"]
+        self.output_file = f"data/{law_code}_dataset.json"
+        
         self.chunks = []
         # Metadata storage for current parsing state
         self.current_part = "Başlangıç"
@@ -25,11 +70,11 @@ class TurkishStatuteRAG:
 
     # --- PHASE A: FETCHING (The Raw Source) ---
     def fetch_statute(self):
-        print(f"Fetching {LAW_URL}...")
+        print(f"Fetching {self.law_url}...")
         try:
             # Fake headers to look like a browser
             headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(LAW_URL, headers=headers)
+            response = requests.get(self.law_url, headers=headers)
             # Mevzuat.gov.tr uses windows-1254 (Turkish Windows) encoding
             response.encoding = 'windows-1254'
             return response.text
@@ -119,17 +164,17 @@ class TurkishStatuteRAG:
     def _create_chunk(self, article_no, fikra_no, text):
         
         # 1. Generate Stable ID (Hierarchy Feature)
-        chunk_id = f"LAW:{LAW_NO}-{article_no}-{fikra_no}"
+        chunk_id = f"LAW:{self.law_code}-{article_no}-{fikra_no}"
 
         # 2. SAC: Generate Parent Summary (Simulated LLM Call)
         parent_summary = self._mock_llm_summarize(article_no, text)
 
         # 3. Poly-Vector: Generate Citation Variations
         citations = [
-            f"TBK {LAW_NO} Madde {article_no}",
-            f"TBK m.{article_no}",
-            f"{LAW_NO} S.K. m.{article_no}",
-            f"Türk Borçlar Kanunu {article_no}. Madde"
+            f"{self.law_abbrev} {self.law_code} Madde {article_no}",
+            f"{self.law_abbrev} m.{article_no}",
+            f"{self.law_code} S.K. m.{article_no}",
+            f"{self.law_name} {article_no}. Madde"
         ]
 
         # 4. GraphRAG: Extract implicit links (Regex)
@@ -142,8 +187,8 @@ class TurkishStatuteRAG:
             "metadata": {
                 "doc_type": "statute",
                 "hierarchy": {
-                    "law_no": LAW_NO,
-                    "law_title": "Türk Borçlar Kanunu",
+                    "law_no": self.law_code,
+                    "law_title": self.law_name,
                     "part": self.current_part,
                     "chapter": self.current_chapter,
                     "article": str(article_no),
@@ -155,13 +200,13 @@ class TurkishStatuteRAG:
                     "journal_no": self.law_meta.get('journal_no', '')
                 },
                 "urls": {
-                    "source_url": LAW_URL
+                    "source_url": self.law_url
                 },
                 "sac_context": {
                     "parent_summary": parent_summary
                 },
                 "poly_vector": {
-                    "citation_label": f"TBK {LAW_NO} Madde {article_no} Fıkra {fikra_no}",
+                    "citation_label": f"{self.law_abbrev} {self.law_code} Madde {article_no} Fıkra {fikra_no}",
                     "citation_variations": citations
                 },
                 "graph_links": links
@@ -173,7 +218,7 @@ class TurkishStatuteRAG:
     def _mock_llm_summarize(self, article_no, text):
         # IN PRODUCTION: Replace this with openai.ChatCompletion.create(...)
         # Prompt: "Summarize the legal intent of this article in one sentence."
-        return f"Bu madde (Md. {article_no}), ilgili borçlar hukuku kuralını ve uygulama şartlarını düzenler."
+        return f"Bu madde (Md. {article_no}), ilgili {self.law_name.lower()} kuralını ve uygulama şartlarını düzenler."
 
     def _extract_graph_links(self, text):
         # Finds references to other laws and articles in Turkish legal texts
@@ -201,7 +246,7 @@ class TurkishStatuteRAG:
         for match in re.finditer(r"(\d+)\s*(?:inci|üncü|nci|ncı|uncu|ıncı)\s+madde", text, re.IGNORECASE):
             ref_article = match.group(1)
             links.append({
-                "target_id": f"LAW:{LAW_NO}-{ref_article}",
+                "target_id": f"LAW:{self.law_code}-{ref_article}",
                 "relation_type": "internal_reference",
                 "text_span": match.group(0)
             })
@@ -210,16 +255,24 @@ class TurkishStatuteRAG:
         for match in re.finditer(r"bu\s+Kanunun\s+(\d+)", text, re.IGNORECASE):
             ref_article = match.group(1)
             links.append({
-                "target_id": f"LAW:{LAW_NO}-{ref_article}",
+                "target_id": f"LAW:{self.law_code}-{ref_article}",
                 "relation_type": "internal_reference",
                 "text_span": match.group(0)
             })
         
         # Pattern 5: "TMK m. X" or "TBK m. X" style references
-        for match in re.finditer(r"(TMK|TBK|TCK|HMK|İİK)\s*m\.?\s*(\d+)", text, re.IGNORECASE):
+        for match in re.finditer(r"(TMK|TBK|TCK|HMK|İİK|TTK|İK)\s*m\.?\s*(\d+)", text, re.IGNORECASE):
             law_abbrev = match.group(1).upper()
             ref_article = match.group(2)
-            law_no_map = {"TMK": "4721", "TBK": "6098", "TCK": "5237", "HMK": "6100", "İİK": "2004"}
+            law_no_map = {
+                "TMK": "4721", 
+                "TBK": "6098", 
+                "TCK": "5237", 
+                "HMK": "6100", 
+                "İİK": "2004",
+                "TTK": "6102",
+                "İK": "4857"
+            }
             target_law_no = law_no_map.get(law_abbrev, "UNKNOWN")
             links.append({
                 "target_id": f"LAW:{target_law_no}-{ref_article}",
@@ -230,24 +283,77 @@ class TurkishStatuteRAG:
         return links
 
     def save_json(self):
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        with open(self.output_file, "w", encoding="utf-8") as f:
             json.dump(self.chunks, f, ensure_ascii=False, indent=2)
-        print(f"Saved {len(self.chunks)} chunks to {OUTPUT_FILE}")
+        print(f"Saved {len(self.chunks)} chunks to {self.output_file}")
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    processor = TurkishStatuteRAG()
+    import sys
     
-    # Phase A
-    html = processor.fetch_statute()
-    
-    if html:
-        # Phase B, C, D
-        processor.parse_html(html)
-        processor.save_json()
+    if len(sys.argv) > 1 and sys.argv[1].isdigit():
+        # Single law code specified via command line
+        law_code = sys.argv[1]
+        print(f"Tek kanun modu: {law_code} ({LAW_INFO.get(law_code, {}).get('name', 'Bilinmeyen')})")
         
-        # Print the specific example from the user request (Article 12)
-        for chunk in processor.chunks:
-            if chunk["metadata"]["hierarchy"]["article"] == "12":
-                print(json.dumps(chunk, ensure_ascii=False, indent=2))
+        if law_code not in LAW_INFO:
+            print(f"UYARI: {law_code} kanun bilgisi bulunamadı. Sadece TBK destekleniyor.")
+            law_code = "6098"
+        
+        processor = TurkishStatuteRAG(law_code=law_code)
+        
+        # Phase A
+        html = processor.fetch_statute()
+        
+        if html:
+            # Phase B, C, D
+            processor.parse_html(html)
+            processor.save_json()
+            
+            # Print the specific example from the user request (Article 12)
+            for chunk in processor.chunks:
+                if chunk["metadata"]["hierarchy"]["article"] == "12":
+                    print(json.dumps(chunk, ensure_ascii=False, indent=2))
+                    break
+    else:
+        # Multi-law mode: Loop through all target laws
+        print(f"Çoklu kanun modu: {len(TARGET_LAWS)} kanun için veri çekme başlatılıyor...")
+        
+        for idx, law_code in enumerate(TARGET_LAWS, 1):
+            print("\n" + "="*60)
+            print(f"[{idx}/{len(TARGET_LAWS)}] KANUN: {law_code} ({LAW_INFO.get(law_code, {}).get('name', 'Bilinmeyen')})")
+            print("="*60)
+            
+            if law_code not in LAW_INFO:
+                print(f"⚠️  {law_code} kanun bilgisi bulunamadı, atlanıyor...")
+                continue
+            
+            processor = TurkishStatuteRAG(law_code=law_code)
+            
+            try:
+                # Phase A
+                html = processor.fetch_statute()
+                
+                if html:
+                    # Phase B, C, D
+                    processor.parse_html(html)
+                    processor.save_json()
+                    print(f"✅ {law_code} için veri çekme tamamlandı. Toplam {len(processor.chunks)} chunk oluşturuldu.")
+                else:
+                    print(f"⚠️  {law_code} için HTML içeriği alınamadı.")
+            except KeyboardInterrupt:
+                print(f"\n⚠️  {law_code} için veri çekme kullanıcı tarafından durduruldu.")
                 break
+            except Exception as e:
+                print(f"❌ {law_code} için veri çekme hatası: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # Sonraki kanuna geçmeden önce kısa bir bekleme
+            if idx < len(TARGET_LAWS):
+                print(f"\n⏳ Sonraki kanuna geçiliyor... (2 saniye)")
+                time.sleep(2)
+        
+        print("\n" + "="*60)
+        print("🎉 TÜM KANUNLAR İÇİN VERİ ÇEKME TAMAMLANDI!")
+        print("="*60)
